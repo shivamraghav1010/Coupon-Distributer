@@ -10,11 +10,15 @@ const port = process.env.PORT || 4000;
 
 
 // Middleware
-app.use(cors({
-  origin: 'http://localhost:3001', 
-  credentials: true 
-}));
+// app.use(cors({
+//   origin: 'http://localhost:3001', 
+//   credentials: true 
+// }));
 
+app.use(cors({
+    origin: '*',  // Allows all origins (not recommended for production)
+    credentials: true
+}));
 
 app.use(express.json()); 
 app.use(express.urlencoded({ extended: true }));
@@ -63,7 +67,7 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 
-const COUPON_CLAIM_COOLDOWN = 3600; // 1 minute in seconds
+const COUPON_CLAIM_COOLDOWN = 60; // 1 minute in seconds
 
 
 
