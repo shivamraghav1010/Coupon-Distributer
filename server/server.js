@@ -67,7 +67,7 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 
-const COUPON_CLAIM_COOLDOWN = 60; // 1 minute in seconds
+const COUPON_CLAIM_COOLDOWN = 3600; // 1 minute in seconds
 
 
 
