@@ -29,7 +29,7 @@ function App() {
         setRemainingTime(0);
 
         try {
-            const response = await axios.get(`${process.env.REACT_APP_SERVER_URL}/coupon`, { withCredentials: true });
+            const response = await axios.get(`https://coupon-distributer-1.onrender.com/api/coupon`);
             setCoupon(response.data.couponCode);
             setMessage(response.data.message);
             toast.success(`Coupon claimed successfully!`);
