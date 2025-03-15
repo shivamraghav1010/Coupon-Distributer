@@ -11,7 +11,7 @@ const port = process.env.PORT || 4000;
 
 // Middleware
 app.use(cors({
-  origin: 'http://localhost:5176', 
+  origin: 'http://localhost:5175', 
   credentials: true 
 }));
 app.use(express.json()); 
@@ -205,8 +205,20 @@ setInterval(async () => {
 }, 30000); // Runs every 30 seconds
 
 
+app.get('/', (req, res) => {
+    res.send(
+        {
+            activeStatus: true,
+            error:false,
+            message: "Server is running"
+        }
+    );
+});
+
+
 
 // Start Server
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
+
