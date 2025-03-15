@@ -2,19 +2,15 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const cookieParser = require('cookie-parser'); 
-const crypto = require('crypto'); // For hashing IP addresses
-const { v4: uuidv4 } = require('uuid'); // For generating unique cookie IDs
+const crypto = require('crypto'); 
+const { v4: uuidv4 } = require('uuid'); 
 require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 4000; 
 
 // Middleware
-app.use(cors({
-    origin: '*',  // Allows all origins (not recommended for production)
-    credentials: false
-}));
-
+app.use(cors({ origin: '*', credentials: false }));
 app.use(express.json()); 
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser()); 
@@ -40,19 +36,7 @@ const cooldownSchema = new mongoose.Schema({
 });
 const Cooldown = mongoose.model('Cooldown', cooldownSchema);
 
-// User Model
-const userSchema = new mongoose.Schema({
-    ipAddress: { type: String, required: true },
-    claimedCoupons: [
-        {
-            code: { type: String, required: true },
-            claimedAt: { type: Date, required: true }
-        }
-    ]
-});
-const User = mongoose.model('User', userSchema);
-
-const COUPON_CLAIM_COOLDOWN = 60; // 1 minute in seconds
+const COUPON_CLAIM_COOLDOWN = 60; // Cooldown in seconds
 
 // Middleware to set a unique cookie if it doesn't exist
 app.use((req, res, next) => {
@@ -61,63 +45,59 @@ app.use((req, res, next) => {
     res.cookie('coupon_user_id', userId, {
       maxAge: 365 * 24 * 60 * 60 * 1000, 
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' ? true : false, 
+      secure: process.env.NODE_ENV === 'production',
       sameSite: 'Lax'
     });
   }
   next();
 });
 
-// Function to check if a user is blocked (based on cooldown)
-async function isBlocked(identifier) {
-    const cooldown = await Cooldown.findOne({ identifier });
-    if (cooldown) {
-        const timeElapsed = (Date.now() - new Date(cooldown.lastClaimed).getTime()) / 1000;
-        console.log(`Cooldown check for ${identifier}: ${timeElapsed} seconds elapsed`);
-
-        if (timeElapsed < COUPON_CLAIM_COOLDOWN) {
-            return { blocked: true, remainingTime: COUPON_CLAIM_COOLDOWN - timeElapsed };
+// Function to check if any identifier is blocked
+async function isBlocked(identifiers) {
+    for (let identifier of identifiers) {
+        const cooldown = await Cooldown.findOne({ identifier });
+        if (cooldown) {
+            const timeElapsed = (Date.now() - new Date(cooldown.lastClaimed).getTime()) / 1000;
+            if (timeElapsed < COUPON_CLAIM_COOLDOWN) {
+                return { blocked: true, remainingTime: COUPON_CLAIM_COOLDOWN - timeElapsed };
+            }
         }
     }
     return { blocked: false, remainingTime: 0 };
 }
 
-// Function to update or create a cooldown
-async function updateCooldown(identifier) {
-    await Cooldown.updateOne(
-        { identifier },
-        { lastClaimed: Date.now() },
-        { upsert: true }
-    );
+// Function to update cooldowns
+async function updateCooldown(identifiers) {
+    const updates = identifiers.map(identifier => ({
+        updateOne: { filter: { identifier }, update: { lastClaimed: Date.now() }, upsert: true }
+    }));
+    await Cooldown.bulkWrite(updates);
 }
 
 // API endpoint to claim a coupon
 app.get('/api/coupon', async (req, res) => {
     const ipAddress = req.ip || req.connection.remoteAddress; 
     const cookieId = req.cookies.coupon_user_id;
-    const userAgent = req.headers['user-agent'] || "unknown"; // Get device type
+    const userAgent = req.headers['user-agent'] || "unknown"; 
 
     const ipHash = crypto.createHash('sha256').update(ipAddress).digest('hex');
-    const uniqueIdentifier = `${ipHash}-${cookieId}-${userAgent}`; // More specific tracking
+    const uniqueIdentifier = `${ipHash}-${cookieId}-${userAgent}`;
 
-    console.log(`Request received: IP=${ipAddress}, CookieID=${cookieId}, UserAgent=${userAgent}`);
+    console.log(`Request: IP=${ipAddress}, Cookie=${cookieId}, UserAgent=${userAgent}`);
 
-    // Check cooldowns
-    const ipCheck = await isBlocked(ipHash);
-    const cookieCheck = await isBlocked(cookieId);
-    const uniqueCheck = await isBlocked(uniqueIdentifier);
-
-    if (ipCheck.blocked || cookieCheck.blocked || uniqueCheck.blocked) {
+    // Check if the user is in cooldown
+    const cooldownCheck = await isBlocked([ipHash, cookieId, uniqueIdentifier]);
+    if (cooldownCheck.blocked) {
         return res.status(429).json({ 
-            message: 'Too many requests from this IP or browser. Please wait.', 
-            remainingTime: Math.max(ipCheck.remainingTime, cookieCheck.remainingTime, uniqueCheck.remainingTime) 
+            message: 'Too many requests. Please wait.', 
+            remainingTime: cooldownCheck.remainingTime 
         });
     }
 
-    // Find an available coupon
+    // Atomically find and update an unclaimed coupon
     const coupon = await Coupon.findOneAndUpdate(
-        { isClaimed: false },
-        { isClaimed: true, claimedAt: new Date() },
+        { isClaimed: false }, 
+        { isClaimed: true, claimedAt: new Date() }, 
         { new: true }
     );
 
@@ -125,29 +105,13 @@ app.get('/api/coupon', async (req, res) => {
         return res.status(404).json({ message: 'No coupons available.' });
     }
 
-    // Update cooldowns
-    await updateCooldown(ipHash);
-    await updateCooldown(cookieId);
-    await updateCooldown(uniqueIdentifier);
-
-    // Log the coupon claim in the User collection
-    await User.updateOne(
-        { ipAddress: ipHash },
-        { 
-            $push: { 
-                claimedCoupons: { 
-                    code: coupon.code, 
-                    claimedAt: new Date() 
-                } 
-            } 
-        },
-        { upsert: true }
-    );
+    // Update cooldowns for all identifiers
+    await updateCooldown([ipHash, cookieId, uniqueIdentifier]);
 
     res.json({ couponCode: coupon.code, message: 'Coupon claimed successfully!' });
 });
 
-// API to initialize coupons (run this only once)
+// API to initialize coupons
 app.post('/api/init-coupons', async (req, res) => {
     const coupons = req.body.coupons;
     if (!Array.isArray(coupons)) {
@@ -175,14 +139,10 @@ setInterval(async () => {
         { isClaimed: false, claimedAt: null }
     );
     console.log('Expired coupons reset.');
-}, 30000); // Runs every 30 seconds
+}, 30000);
 
 app.get('/', (req, res) => {
-    res.send({
-        activeStatus: true,
-        error: false,
-        message: "Server is running"
-    });
+    res.send({ activeStatus: true, error: false, message: "Server is running" });
 });
 
 // Start Server
