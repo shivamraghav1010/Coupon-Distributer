@@ -29,7 +29,7 @@ function App() {
         setRemainingTime(0);
 
         try {
-            const response = await axios.get('http://localhost:4001/api/coupon', { withCredentials: true });
+            const response = await axios.get(`${process.env.REACT_APP_SERVER_URL}/coupon`, { withCredentials: true });
             setCoupon(response.data.couponCode);
             setMessage(response.data.message);
             toast.success(`Coupon claimed successfully!`);
