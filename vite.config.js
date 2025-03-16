@@ -11,6 +11,24 @@
 
 // frontend/vite.config.js
 // frontend/vite.config.js
+// import { defineConfig } from 'vite';
+// import react from '@vitejs/plugin-react';
+
+// export default defineConfig({
+//   plugins: [react()],
+//   server: {
+//     port: 5175,
+//     proxy: {
+//       '/api': {
+//         // target: 'http://localhost:3001',
+//         target: 'https://coupon-distributer-1.onrender.com', 
+//         changeOrigin: true,
+//         secure: false,
+//       },
+//     },
+//   },
+// });
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -20,8 +38,7 @@ export default defineConfig({
     port: 5175,
     proxy: {
       '/api': {
-        // target: 'http://localhost:3001',
-        target: 'https://coupon-distributer-1.onrender.com', 
+        target: 'http://localhost:3001', // For local dev only
         changeOrigin: true,
         secure: false,
       },

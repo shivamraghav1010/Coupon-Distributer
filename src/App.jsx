@@ -1,10 +1,12 @@
-// frontend/src/App.jsx
 import React, { useState } from 'react';
 import axios from 'axios';
 import { ToastContainer, toast } from 'react-toastify';
 import { FaSpinner, FaGift } from 'react-icons/fa';
 import 'react-toastify/dist/ReactToastify.css';
 import './App.css';
+
+// Define the API base URL based on the environment
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 
 function App() {
   const [message, setMessage] = useState('');
@@ -18,7 +20,7 @@ function App() {
     setCouponCode('');
 
     try {
-      const response = await axios.get('/api/claim-coupon', {
+      const response = await axios.get(`${API_BASE_URL}/api/claim-coupon`, {
         withCredentials: true,
       });
 
@@ -31,14 +33,14 @@ function App() {
       if (success) {
         toast.success(`Coupon ${coupon} claimed!`, { position: 'top-right' });
       } else {
-        toast.warn(message, { position: 'top-right' }); // Use warn for non-error failures like 429
+        toast.warn(message, { position: 'top-right' });
       }
     } catch (error) {
       const errorMsg = error.response?.data?.message || error.message || 'An error occurred while claiming the coupon';
       setMessage(errorMsg);
       setIsSuccess(false);
       if (error.response?.status === 429) {
-        toast.warn(errorMsg, { position: 'top-right' }); // Specific handling for 429
+        toast.warn(errorMsg, { position: 'top-right' });
       } else {
         toast.error(errorMsg, { position: 'top-right' });
       }
