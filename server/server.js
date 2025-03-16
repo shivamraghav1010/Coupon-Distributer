@@ -7,7 +7,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3000; // Render will override this with its own PORT
 
 // Middleware
 app.use(cors({
@@ -18,7 +18,7 @@ app.use(cookieParser());
 app.use(express.json());
 
 // MongoDB Connection
-const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://shivamraghav32816:MuohA62xRm9G2iX9@cluster0.g1mwz.mongodb.net/coupon-system?retryWrites=true&w=majority';
+const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://shivamraghav32816:MuohA62xRm9G2iX9@cluster0.g1mwz.mongodb.net/donenext?retryWrites=true&w=majority';
 mongoose.connect(mongoUri)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
@@ -74,7 +74,6 @@ app.get('/api/claim-coupon', claimLimiter, async (req, res) => {
     const clientIp = req.ip;
     const cookieId = req.cookies['coupon_session'] || Date.now().toString();
 
-    // Cookie-based restriction (1 minute for testing; revert to 24 hours for production)
     if (req.cookies['last_claim']) {
       const lastClaim = parseInt(req.cookies['last_claim']);
       const minutesSince = (Date.now() - lastClaim) / (1000 * 60);
@@ -87,7 +86,6 @@ app.get('/api/claim-coupon', claimLimiter, async (req, res) => {
       }
     }
 
-    // Round-robin coupon distribution
     const coupon = await Coupon.findOneAndUpdate(
       { used: false },
       { used: true, claimedByIp: clientIp, claimedAt: new Date() },
@@ -145,10 +143,10 @@ app.post('/api/add-coupon', async (req, res) => {
   }
 });
 
-// For serverless deployment
-module.exports = app;
+// Always listen on the port (for Render and local)
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
 
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(port, () => console.log(`Server running at http://localhost:${port}`));
-}
+// For serverless deployment (optional, not needed for Render)
+module.exports = app;
