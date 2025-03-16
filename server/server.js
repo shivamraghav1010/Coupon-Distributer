@@ -1,192 +1,167 @@
+// backend/server.js
 const express = require('express');
 const mongoose = require('mongoose');
+const cookieParser = require('cookie-parser');
+const rateLimit = require('express-rate-limit');
 const cors = require('cors');
-const cookieParser = require('cookie-parser'); 
-const crypto = require('crypto'); // For hashing IP addresses
-const { v4: uuidv4 } = require('uuid'); // For generating unique cookie IDs
-require("dotenv").config();
+require('dotenv').config(); // Add this for environment variables
+
 const app = express();
-const port = process.env.PORT || 4000; 
+const port = process.env.PORT || 3000; // Use environment variable for port
 
 // Middleware
 app.use(cors({
-    origin: '*',
-    credentials: true
+  origin: 'https://coupon-distributer-frontend.vercel.app',
+  credentials: true
 }));
-
-app.use(express.json()); 
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser()); 
+app.use(cookieParser());
+app.use(express.json());
 
 // MongoDB Connection
-const mongoURI = process.env.MONGODB_URI;
-mongoose.connect(mongoURI)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
+mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://shivamraghav32816:MuohA62xRm9G2iX9@cluster0.g1mwz.mongodb.net/coupon-system', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
-// Coupon Model
-const couponSchema = new mongoose.Schema({
-    code: { type: String, required: true, unique: true },
-    isClaimed: { type: Boolean, default: false },
-    claimedAt: { type: Date, default: null } 
+// Coupon Schema
+const CouponSchema = new mongoose.Schema({
+  code: String,
+  used: { type: Boolean, default: false },
+  claimedByIp: String,
+  claimedAt: Date
 });
-const Coupon = mongoose.model('Coupon', couponSchema);
 
-// Cooldown Model
-const cooldownSchema = new mongoose.Schema({
-    identifier: { type: String, required: true, unique: true },
-    lastClaimed: { type: Date, default: Date.now },
+const Coupon = mongoose.model('Coupon', CouponSchema);
+
+// Claim Schema
+const ClaimSchema = new mongoose.Schema({
+  ip: String,
+  lastClaim: Date
 });
-const Cooldown = mongoose.model('Cooldown', cooldownSchema);
 
-// User Model
-const userSchema = new mongoose.Schema({
-    ipAddress: { type: String, required: true },
-    claimedCoupons: [
-        {
-            code: { type: String, required: true },
-            claimedAt: { type: Date, required: true }
-        }
-    ]
-});
-const User = mongoose.model('User', userSchema);
+const Claim = mongoose.model('Claim', ClaimSchema);
 
-const COUPON_CLAIM_COOLDOWN = 3600; // 1 minute in seconds
-
-// Middleware to set a unique cookie if it doesn't exist
-app.use((req, res, next) => {
-  if (!req.cookies.coupon_user_id) {
-    const userId = uuidv4();
-    res.cookie('coupon_user_id', userId, {
-      maxAge: 365 * 24 * 60 * 60 * 1000, 
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Lax'
-    });
+// Initial coupons (run once)
+async function initializeCoupons() {
+  const count = await Coupon.countDocuments();
+  if (count === 0) {
+    const initialCoupons = ['DISC10', 'SAVE20', 'FREE15', 'OFFER25', 'DEAL30'];
+    await Coupon.insertMany(initialCoupons.map(code => ({ code })));
+    console.log('Initial coupons inserted');
   }
-  next();
+}
+initializeCoupons();
+
+// Rate limiter (1 hour cooldown)
+const claimLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 1,
+  keyGenerator: (req) => req.ip,
+  message: (req) => ({
+    success: false,
+    message: `Please wait ${Math.ceil((req.rateLimit.resetTime - Date.now()) / 60000)} minutes`
+  })
 });
 
-// Function to check if a user is blocked (based on cooldown)
-async function isBlocked(identifier) {
-    const cooldown = await Cooldown.findOne({ identifier });
-    if (cooldown) {
-        const timeElapsed = (Date.now() - new Date(cooldown.lastClaimed).getTime()) / 1000;
+// Claim endpoint
+app.get('/api/claim-coupon', claimLimiter, async (req, res) => {
+  try {
+    const clientIp = req.ip;
+    const cookieId = req.cookies['coupon_session'] || Date.now().toString();
 
-        if (timeElapsed < COUPON_CLAIM_COOLDOWN) {
-            return { blocked: true, remainingTime: COUPON_CLAIM_COOLDOWN - timeElapsed };
-        }
-    }
-    return { blocked: false, remainingTime: 0 };
-}
-
-// Function to update or create a cooldown
-async function updateCooldown(identifier) {
-    await Cooldown.updateOne(
-        { identifier },
-        { lastClaimed: Date.now() },
-        { upsert: true }
-    );
-}
-
-// API endpoint to claim a coupon
-app.get('/api/coupon', async (req, res) => {
-    const ipAddress = req.ip || req.connection.remoteAddress; 
-    const cookieId = req.cookies.coupon_user_id;
-    const ipHash = crypto.createHash('sha256').update(ipAddress).digest('hex');
-
-    console.log(`Request received: IP=${ipAddress}, CookieID=${cookieId}`);
-
-    // Check cooldown for this specific user (identified by IP or Cookie)
-    const ipCheck = await isBlocked(ipHash);
-    const cookieCheck = await isBlocked(cookieId);
-
-    if (ipCheck.blocked) {
-        return res.status(429).json({ message: 'You have already claimed a coupon. Please wait.', remainingTime: ipCheck.remainingTime });
-    }
-    if (cookieCheck.blocked) {
-        return res.status(429).json({ message: 'You have already claimed a coupon. Please wait.', remainingTime: cookieCheck.remainingTime });
+    // Check cookie restriction (24 hours)
+    if (req.cookies['last_claim']) {
+      const lastClaim = parseInt(req.cookies['last_claim']);
+      const hoursSince = (Date.now() - lastClaim) / (1000 * 60 * 60);
+      if (hoursSince < 24) {
+        return res.json({
+          success: false,
+          message: `Please wait ${Math.ceil(24 - hoursSince)} hours`
+        });
+      }
     }
 
-    // Find an available coupon (consider expired claims as available)
+    // Find next available coupon
     const coupon = await Coupon.findOneAndUpdate(
-        { 
-            $or: [
-                { isClaimed: false },  // Unclaimed coupons
-                { claimedAt: { $lt: new Date(Date.now() - COUPON_CLAIM_COOLDOWN * 1000) } } // Expired claims
-            ] 
-        },
-        { isClaimed: true, claimedAt: new Date() },  // Mark as claimed
-        { new: true }
+      { used: false },
+      { used: true, claimedByIp: clientIp, claimedAt: new Date() },
+      { new: true, sort: { _id: 1 } }
     );
 
     if (!coupon) {
-        return res.status(404).json({ message: 'No coupons available.' });
+      return res.json({ success: false, message: 'No coupons available' });
     }
 
-    // Update cooldown for the specific user
-    await updateCooldown(ipHash);
-    await updateCooldown(cookieId);
-
-    // Store claim history in the User collection
-    await User.updateOne(
-        { ipAddress: ipHash },
-        { 
-            $push: { 
-                claimedCoupons: { 
-                    code: coupon.code, 
-                    claimedAt: new Date() 
-                } 
-            } 
-        },
-        { upsert: true }
+    // Record claim
+    await Claim.findOneAndUpdate(
+      { ip: clientIp },
+      { lastClaim: new Date() },
+      { upsert: true }
     );
 
-    res.json({ couponCode: coupon.code, message: 'Coupon claimed successfully!' });
-});
+    res.cookie('coupon_session', cookieId, { maxAge: 24 * 60 * 60 * 1000 });
+    res.cookie('last_claim', Date.now(), { maxAge: 24 * 60 * 60 * 1000 });
 
-// API to initialize coupons (run this only once)
-app.post('/api/init-coupons', async (req, res) => {
-    const coupons = req.body.coupons;
-    if (!Array.isArray(coupons)) {
-        return res.status(400).json({ message: 'Coupons must be an array.' });
-    }
-    try {
-        await Coupon.insertMany(coupons.map(code => ({ code, isClaimed: false })));
-        return res.status(201).json({ message: 'Coupons initialized successfully!' });
-    } catch (error) {
-        console.error('Error initializing coupons:', error);
-        return res.status(500).json({ message: 'Error initializing coupons.' });
-    }
-});
-
-// API to reset cooldowns (for testing purposes)
-app.delete('/api/reset-cooldown', async (req, res) => {
-    await Cooldown.deleteMany({});
-    res.json({ message: "Cooldown reset successfully" });
-});
-
-// Background job to reset expired coupons every 10 seconds
-setInterval(async () => {
-    const expiredCoupons = await Coupon.updateMany(
-        { isClaimed: true, claimedAt: { $lt: new Date(Date.now() - COUPON_CLAIM_COOLDOWN * 1000) } },
-        { isClaimed: false, claimedAt: null }
-    );
-
-    if (expiredCoupons.modifiedCount > 0) {
-        console.log(`✅ ${expiredCoupons.modifiedCount} expired coupons have been reset.`);
-    }
-}, 10000); // Runs every 10 seconds
-
-app.get('/', (req, res) => {
-    res.send({
-        activeStatus: true,
-        error: false,
-        message: "Server is running"
+    res.json({
+      success: true,
+      coupon: coupon.code,
+      message: `Coupon ${coupon.code} claimed!`
     });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
 });
 
-// Start Server
-app.listen(port, () => {
-    console.log(`🚀 Server is running on port ${port}`);
+// New endpoint to insert coupons
+app.post('/api/add-coupon', async (req, res) => {
+  try {
+    const { code } = req.body;
+    
+    // Validate input
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Coupon code is required and must be a string'
+      });
+    }
+
+    // Check if coupon already exists
+    const existingCoupon = await Coupon.findOne({ code });
+    if (existingCoupon) {
+      return res.status(400).json({
+        success: false,
+        message: 'Coupon code already exists'
+      });
+    }
+
+    // Create new coupon
+    const newCoupon = new Coupon({
+      code,
+      used: false
+    });
+    
+    await newCoupon.save();
+    
+    res.status(201).json({
+      success: true,
+      message: `Coupon ${code} added successfully`,
+      coupon: newCoupon
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error adding coupon',
+      error: error.message
+    });
+  }
 });
+
+// For serverless deployment (e.g., Vercel), export the app
+module.exports = app;
+
+// For local development, start the server
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(port, () => console.log(`Server running at http://localhost:${port}`));
+}
