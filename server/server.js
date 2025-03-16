@@ -1,4 +1,3 @@
-// backend/server.js
 const express = require('express');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
@@ -7,7 +6,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3000; // Render will override this with its own PORT
+const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
@@ -54,10 +53,26 @@ async function initializeCoupons() {
 }
 initializeCoupons();
 
-// Rate limiter (1 minute for testing; revert to 60 * 60 * 1000 for production)
+// Function to reset all coupons
+async function resetAllCoupons() {
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+    await Coupon.updateMany({}, { $set: { used: false, claimedByIp: null, claimedAt: null } }, { session });
+    await session.commitTransaction();
+    console.log('All coupons have been reset');
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Error resetting all coupons:', error);
+  } finally {
+    session.endSession();
+  }
+}
+
+// Rate limiter (60 seconds per IP)
 const claimLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 1,
+  windowMs: 60 * 1000, // 60 seconds
+  max: 1, // 1 claim per window
   keyGenerator: req => req.ip,
   handler: (req, res) => {
     const timeLeft = Math.ceil((req.rateLimit.resetTime - Date.now()) / 1000);
@@ -70,49 +85,60 @@ const claimLimiter = rateLimit({
 
 // Claim endpoint
 app.get('/api/claim-coupon', claimLimiter, async (req, res) => {
+  const session = await mongoose.startSession();
   try {
+    session.startTransaction();
     const clientIp = req.ip;
     const cookieId = req.cookies['coupon_session'] || Date.now().toString();
 
-    if (req.cookies['last_claim']) {
-      const lastClaim = parseInt(req.cookies['last_claim']);
-      const minutesSince = (Date.now() - lastClaim) / (1000 * 60);
-      if (minutesSince < 1) {
-        const timeLeft = Math.ceil(1 - minutesSince);
-        return res.status(429).json({
-          success: false,
-          message: `Please wait ${timeLeft} minute${timeLeft > 1 ? 's' : ''} before claiming again`,
-        });
-      }
-    }
-
-    const coupon = await Coupon.findOneAndUpdate(
+    // Find and claim an unused coupon atomically
+    let coupon = await Coupon.findOneAndUpdate(
       { used: false },
-      { used: true, claimedByIp: clientIp, claimedAt: new Date() },
-      { new: true, sort: { _id: 1 } }
+      { $set: { used: true, claimedByIp: clientIp, claimedAt: new Date() } },
+      { session, new: true, sort: { _id: 1 } }
     );
 
     if (!coupon) {
-      return res.status(404).json({ success: false, message: 'No coupons available' });
+      // Check if all coupons are used
+      const unusedCount = await Coupon.countDocuments({ used: false }, { session });
+      if (unusedCount === 0) {
+        await resetAllCoupons(); // Reset only if all coupons are claimed
+        coupon = await Coupon.findOneAndUpdate(
+          { used: false },
+          { $set: { used: true, claimedByIp: clientIp, claimedAt: new Date() } },
+          { session, new: true, sort: { _id: 1 } }
+        );
+        if (!coupon) {
+          return res.status(404).json({ success: false, message: 'No coupons available after reset' });
+        }
+      } else {
+        return res.status(404).json({ success: false, message: 'No coupons available at this time' });
+      }
     }
 
+    // Update the user's last claim time
     await Claim.findOneAndUpdate(
       { ip: clientIp },
       { lastClaim: new Date() },
-      { upsert: true }
+      { upsert: true, session }
     );
 
+    // Set cookies
     res.cookie('coupon_session', cookieId, { maxAge: 24 * 60 * 60 * 1000, httpOnly: true });
     res.cookie('last_claim', Date.now(), { maxAge: 24 * 60 * 60 * 1000, httpOnly: true });
 
+    await session.commitTransaction();
     res.json({
       success: true,
       coupon: coupon.code,
       message: `Coupon ${coupon.code} claimed successfully!`,
     });
   } catch (error) {
+    await session.abortTransaction();
     console.error('Claim error:', error);
     res.status(500).json({ success: false, message: 'Server error occurred' });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -147,10 +173,8 @@ app.get('/', (req, res) => {
   res.json({ message: 'Backend running successfully' });
 });
 
-// Always listen on the port (for Render and local)
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
 
-// For serverless deployment (optional, not needed for Render)
 module.exports = app;
