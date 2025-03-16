@@ -1,36 +1,49 @@
 // frontend/src/App.jsx
 import React, { useState } from 'react';
+import axios from 'axios';
+import { ToastContainer, toast } from 'react-toastify';
+import { FaSpinner, FaGift } from 'react-icons/fa';
+import 'react-toastify/dist/ReactToastify.css';
 import './App.css';
 
 function App() {
   const [message, setMessage] = useState('');
+  const [couponCode, setCouponCode] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
-  const [isLoading, setIsLoading] = useState(false); // Add loading state
+  const [isLoading, setIsLoading] = useState(false);
 
   const claimCoupon = async () => {
-    setIsLoading(true); // Start loading
-    setMessage(''); // Clear previous message
-    
+    setIsLoading(true);
+    setMessage('');
+    setCouponCode('');
+
     try {
-      const response = await fetch('https://coupon-distributer-1.onrender.com/api/claim-coupon', {
-        credentials: 'include', // Include cookies for session tracking
+      const response = await axios.get('/api/claim-coupon', {
+        withCredentials: true,
       });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+
+      const { success, message, coupon } = response.data;
+
+      setMessage(message);
+      setCouponCode(coupon || '');
+      setIsSuccess(success);
+
+      if (success) {
+        toast.success(`Coupon ${coupon} claimed!`, { position: 'top-right' });
+      } else {
+        toast.warn(message, { position: 'top-right' }); // Use warn for non-error failures like 429
       }
-      
-      const data = await response.json();
-      setMessage(data.message);
-      setIsSuccess(data.success);
     } catch (error) {
-      console.error('Error claiming coupon:', error);
-      setMessage(error.message === 'Failed to fetch' 
-        ? 'Network error: Please check your connection' 
-        : 'An error occurred while claiming the coupon');
+      const errorMsg = error.response?.data?.message || error.message || 'An error occurred while claiming the coupon';
+      setMessage(errorMsg);
       setIsSuccess(false);
+      if (error.response?.status === 429) {
+        toast.warn(errorMsg, { position: 'top-right' }); // Specific handling for 429
+      } else {
+        toast.error(errorMsg, { position: 'top-right' });
+      }
     } finally {
-      setIsLoading(false); // Stop loading
+      setIsLoading(false);
     }
   };
 
@@ -38,13 +51,18 @@ function App() {
     <div className="App">
       <h1>Claim Your Coupon</h1>
       <button onClick={claimCoupon} disabled={isLoading}>
-        {isLoading ? 'Claiming...' : 'Get Coupon'}
+        {isLoading ? <FaSpinner className="spin" /> : <FaGift />}
+        {isLoading ? ' Claiming...' : ' Get Coupon'}
       </button>
       {message && (
         <div className={`message ${isSuccess ? 'success' : 'error'}`}>
           {message}
+          {isSuccess && couponCode && (
+            <p>Your coupon code: <strong>{couponCode}</strong></p>
+          )}
         </div>
       )}
+      <ToastContainer />
     </div>
   );
 }
