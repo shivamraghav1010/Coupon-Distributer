@@ -143,6 +143,10 @@ app.post('/api/add-coupon', async (req, res) => {
   }
 });
 
+app.get('/', (req, res) => {
+  res.json({ message: 'Backend running successfully' });
+});
+
 // Always listen on the port (for Render and local)
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
