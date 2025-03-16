@@ -4,65 +4,68 @@ const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const cors = require('cors');
-require('dotenv').config(); // Add this for environment variables
+require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3000; // Use environment variable for port
+const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: 'https://coupon-distributer-frontend.vercel.app',
-  credentials: true
+  origin: process.env.FRONTEND_URL || 'http://localhost:5175',
+  credentials: true,
 }));
 app.use(cookieParser());
 app.use(express.json());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://shivamraghav32816:MuohA62xRm9G2iX9@cluster0.g1mwz.mongodb.net/coupon-system', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
+const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://shivamraghav32816:MuohA62xRm9G2iX9@cluster0.g1mwz.mongodb.net/coupon-system?retryWrites=true&w=majority';
+mongoose.connect(mongoUri)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
 // Coupon Schema
 const CouponSchema = new mongoose.Schema({
-  code: String,
+  code: { type: String, required: true, unique: true },
   used: { type: Boolean, default: false },
   claimedByIp: String,
-  claimedAt: Date
+  claimedAt: Date,
 });
-
 const Coupon = mongoose.model('Coupon', CouponSchema);
 
 // Claim Schema
 const ClaimSchema = new mongoose.Schema({
-  ip: String,
-  lastClaim: Date
+  ip: { type: String, required: true },
+  lastClaim: { type: Date, required: true },
 });
-
 const Claim = mongoose.model('Claim', ClaimSchema);
 
-// Initial coupons (run once)
+// Initialize coupons
 async function initializeCoupons() {
-  const count = await Coupon.countDocuments();
-  if (count === 0) {
-    const initialCoupons = ['DISC10', 'SAVE20', 'FREE15', 'OFFER25', 'DEAL30'];
-    await Coupon.insertMany(initialCoupons.map(code => ({ code })));
-    console.log('Initial coupons inserted');
+  try {
+    const count = await Coupon.countDocuments();
+    if (count === 0) {
+      const initialCoupons = ['DISC10', 'SAVE20', 'FREE15', 'OFFER25', 'DEAL30'];
+      await Coupon.insertMany(initialCoupons.map(code => ({ code })));
+      console.log('Initial coupons inserted');
+    }
+  } catch (error) {
+    console.error('Error initializing coupons:', error);
   }
 }
 initializeCoupons();
 
-// Rate limiter (1 hour cooldown)
+// Rate limiter (1 minute for testing; revert to 60 * 60 * 1000 for production)
 const claimLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
+  windowMs: 60 * 1000, // 1 minute
   max: 1,
-  keyGenerator: (req) => req.ip,
-  message: (req) => ({
-    success: false,
-    message: `Please wait ${Math.ceil((req.rateLimit.resetTime - Date.now()) / 60000)} minutes`
-  })
+  keyGenerator: req => req.ip,
+  handler: (req, res) => {
+    const timeLeft = Math.ceil((req.rateLimit.resetTime - Date.now()) / 1000);
+    res.status(429).json({
+      success: false,
+      message: `Please wait ${timeLeft} second${timeLeft > 1 ? 's' : ''} before claiming again`,
+    });
+  },
 });
 
 // Claim endpoint
@@ -71,19 +74,20 @@ app.get('/api/claim-coupon', claimLimiter, async (req, res) => {
     const clientIp = req.ip;
     const cookieId = req.cookies['coupon_session'] || Date.now().toString();
 
-    // Check cookie restriction (24 hours)
+    // Cookie-based restriction (1 minute for testing; revert to 24 hours for production)
     if (req.cookies['last_claim']) {
       const lastClaim = parseInt(req.cookies['last_claim']);
-      const hoursSince = (Date.now() - lastClaim) / (1000 * 60 * 60);
-      if (hoursSince < 24) {
-        return res.json({
+      const minutesSince = (Date.now() - lastClaim) / (1000 * 60);
+      if (minutesSince < 1) {
+        const timeLeft = Math.ceil(1 - minutesSince);
+        return res.status(429).json({
           success: false,
-          message: `Please wait ${Math.ceil(24 - hoursSince)} hours`
+          message: `Please wait ${timeLeft} minute${timeLeft > 1 ? 's' : ''} before claiming again`,
         });
       }
     }
 
-    // Find next available coupon
+    // Round-robin coupon distribution
     const coupon = await Coupon.findOneAndUpdate(
       { used: false },
       { used: true, claimedByIp: clientIp, claimedAt: new Date() },
@@ -91,77 +95,60 @@ app.get('/api/claim-coupon', claimLimiter, async (req, res) => {
     );
 
     if (!coupon) {
-      return res.json({ success: false, message: 'No coupons available' });
+      return res.status(404).json({ success: false, message: 'No coupons available' });
     }
 
-    // Record claim
     await Claim.findOneAndUpdate(
       { ip: clientIp },
       { lastClaim: new Date() },
       { upsert: true }
     );
 
-    res.cookie('coupon_session', cookieId, { maxAge: 24 * 60 * 60 * 1000 });
-    res.cookie('last_claim', Date.now(), { maxAge: 24 * 60 * 60 * 1000 });
+    res.cookie('coupon_session', cookieId, { maxAge: 24 * 60 * 60 * 1000, httpOnly: true });
+    res.cookie('last_claim', Date.now(), { maxAge: 24 * 60 * 60 * 1000, httpOnly: true });
 
     res.json({
       success: true,
       coupon: coupon.code,
-      message: `Coupon ${coupon.code} claimed!`
+      message: `Coupon ${coupon.code} claimed successfully!`,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    console.error('Claim error:', error);
+    res.status(500).json({ success: false, message: 'Server error occurred' });
   }
 });
 
-// New endpoint to insert coupons
+// Add coupon endpoint
 app.post('/api/add-coupon', async (req, res) => {
   try {
     const { code } = req.body;
-    
-    // Validate input
     if (!code || typeof code !== 'string') {
-      return res.status(400).json({
-        success: false,
-        message: 'Coupon code is required and must be a string'
-      });
+      return res.status(400).json({ success: false, message: 'Valid coupon code required' });
     }
 
-    // Check if coupon already exists
     const existingCoupon = await Coupon.findOne({ code });
     if (existingCoupon) {
-      return res.status(400).json({
-        success: false,
-        message: 'Coupon code already exists'
-      });
+      return res.status(400).json({ success: false, message: 'Coupon code already exists' });
     }
 
-    // Create new coupon
-    const newCoupon = new Coupon({
-      code,
-      used: false
-    });
-    
+    const newCoupon = new Coupon({ code });
     await newCoupon.save();
-    
+
     res.status(201).json({
       success: true,
       message: `Coupon ${code} added successfully`,
-      coupon: newCoupon
+      coupon: newCoupon,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error adding coupon',
-      error: error.message
-    });
+    console.error('Add coupon error:', error);
+    res.status(500).json({ success: false, message: 'Error adding coupon' });
   }
 });
 
-// For serverless deployment (e.g., Vercel), export the app
+// For serverless deployment
 module.exports = app;
 
-// For local development, start the server
+// For local development
 if (process.env.NODE_ENV !== 'production') {
   app.listen(port, () => console.log(`Server running at http://localhost:${port}`));
 }
